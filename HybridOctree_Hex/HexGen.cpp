@@ -1,6 +1,16 @@
 #include "HexGen.h"
-#include <cstdint>
+#include <array>
 #include <unordered_map>
+#include <utility>
+
+// Exact integer lattice keys. No iteration over hash buckets determines output order.
+struct LatticeHash {
+	size_t operator()(const std::array<int, 3>& p) const {
+		size_t h = 0;
+		for (int value : p) h = h * 1000003u + std::hash<int>()(value);
+		return h;
+	}
+};
 double ELEM_THRES = 0.01;// element floating quality threshold
 int octreeENum; int hexMeshENum;
 
@@ -123,13 +133,13 @@ inline int Intersect(double p1[3], double q1[3], double r1[3], double p2[3], dou
 	if (dp2 * dq2 > 0 && dp2 * dr2 > 0) return 0;
 
 	// permutation in a canonical form of T1's vertices
-	if (std::abs(dp1) <= DIST_THRES) dp1 = 0;
-	if (std::abs(dq1) <= DIST_THRES) dq1 = 0;
-	if (std::abs(dr1) <= DIST_THRES) dr1 = 0;
+	if (abs(dp1) <= DIST_THRES) dp1 = 0;
+	if (abs(dq1) <= DIST_THRES) dq1 = 0;
+	if (abs(dr1) <= DIST_THRES) dr1 = 0;
 
-	if (std::abs(dp2) <= DIST_THRES) dp2 = 0;
-	if (std::abs(dq2) <= DIST_THRES) dq2 = 0;
-	if (std::abs(dr2) <= DIST_THRES) dr2 = 0;
+	if (abs(dp2) <= DIST_THRES) dp2 = 0;
+	if (abs(dq2) <= DIST_THRES) dq2 = 0;
+	if (abs(dr2) <= DIST_THRES) dr2 = 0;
 
 	if (dp1 > 0) {
 		if (dq1 > 0) TRI_TRI_3D(r1, p1, q1, p2, r2, q2, dp2, dr2, dq2)
@@ -169,7 +179,7 @@ inline int Intersect(double a[3], double b[3], double c[3], double p[3], double 
 	double C = (a[0] * (c[1] - b[1]) - b[0] * (c[1] - a[1]) + c[0] * (b[1] - a[1]));
 	double D = a[0] * (b[1] * c[2] - c[1] * b[2]) - b[0] * (a[1] * c[2] - a[2] * c[1]) + c[0] * (a[1] * b[2] - a[2] * b[1]);
 	double tmp2 = A * dir[0] + B * dir[1] + C * dir[2];
-	if (std::abs(tmp2) < DIST_THRES)// parallel
+	if (abs(tmp2) < DIST_THRES)// parallel
 		return -1;
 	else {
 		alpha = (-A * p[0] - B * p[1] - C * p[2] - D) / tmp2;
@@ -196,11 +206,11 @@ inline double PointToTri(double a[3], double b[3], double c[3], double p[3], dou
 	double D = a[0] * (b[1] * c[2] - c[1] * b[2]) - b[0] * (a[1] * c[2] - a[2] * c[1]) + c[0] * (a[1] * b[2] - a[2] * b[1]);
 	double sum = A * A + B * B + C * C, tmp = (-A * p[0] - B * p[1] - C * p[2] - D);
 	double alpha = tmp / sqrt(sum);// distance 1
-	if (std::abs(alpha) >= currMin) return std::abs(alpha);
+	if (abs(alpha) >= currMin) return abs(alpha);
 	q[0] = p[0] + A * tmp / sum;
 	q[1] = p[1] + B * tmp / sum;
 	q[2] = p[2] + C * tmp / sum;
-	alpha = std::abs(alpha);
+	alpha = abs(alpha);
 
 	double QA = sqrt(dist(q, a)), QB = sqrt(dist(q, b)), QC = sqrt(dist(q, c)), AB = sqrt(dist(a, b)), AC = sqrt(dist(a, c)), BC = sqrt(dist(b, c));
 	double S1 = TriArea(QA, QB, AB), S2 = TriArea(QA, QC, AC), S3 = TriArea(QB, QC, BC);
@@ -774,8 +784,6 @@ inline void iSj(double p0[3], double p1[3], double p2[3], double p3[3], double p
 
 // hexGen
 hexGen::hexGen(int depth) {
-	if (depth < 1 || depth > 10)
-		throw std::invalid_argument("Octree depth must be in [1, 10]");
 	octreeDepth = depth;
 	voxelSize = 1 << depth;// to the power of 2
 }
@@ -783,34 +791,28 @@ hexGen::hexGen(int depth) {
 hexGen::~hexGen(void) { }
 
 void hexGen::InitializeOctree(const char* inputFileName, const char* outputFileName) {
+	octreeArray.resize(levelId[octreeDepth + 1], false);
+	cutArray.resize(MAX_NUM);
+	cutArray1.resize(MAX_NUM);
+	getLevel.resize(levelId[octreeDepth + 1]);
+	//for (int i = 0; i < getLevel.size(); i++)
+	//	for (int j = octreeDepth; j > -1; j--)
+	//		if (levelId[j] <= i) {
+	//			getLevel[i] = j; break;
+	//		}
+	getLevel[0] = 0;
+	for (int i = 1; i < octreeDepth; i++)
+	{
+		std::fill(getLevel.begin() + levelId[i], getLevel.begin() + levelId[i + 1], i);
+	}
 	ReadRawData(inputFileName, outputFileName);
-	octreeArray.assign(levelId[octreeDepth + 1], false);
-	cutArray.clear();
-	cutArray1.clear();
-	leafNum = 0;
-}
-
-void hexGen::EnsureSurfaceIndex() {
-	if (surfaceIndex.Empty()) surfaceIndex.Build(triMesh);
-	if (surfaceIndex.Empty()) throw std::runtime_error("Surface mesh has no triangles");
-}
-
-double hexGen::NearestSurface(double point[3], double closest[3], int* triangle) {
-	const auto result = surfaceIndex.Nearest(point, [&](int id, double* target) {
-		return PointToTri(triMesh.v[triMesh.e[id][0]], triMesh.v[triMesh.e[id][1]],
-			triMesh.v[triMesh.e[id][2]], point, target, std::numeric_limits<double>::infinity());
-	});
-	if (result.triangle < 0) throw std::runtime_error("Surface has no finite nearest point");
-	std::copy(result.point.begin(), result.point.end(), closest);
-	if (triangle) *triangle = result.triangle;
-	return result.distance;
 }
 
 inline void hexGen::ReadRawData(const char* inputFileName, const char* outputFileName) {
-	surfaceIndex.Clear();
 	FILE* dataFile = fopen(inputFileName, "r");
 	if (NULL == dataFile) {
-		throw std::runtime_error(std::string("Cannot open surface mesh: ") + inputFileName);
+		std::cerr << "ErrorCode 0: Wrong file name " << inputFileName << std::endl;
+		return;
 	}
 	
 	char line[256];
@@ -926,8 +928,6 @@ inline void hexGen::ReadRawData(const char* inputFileName, const char* outputFil
 }
 
 inline void hexGen::GetCellValue() {
-	EnsureSurfaceIndex();
-	std::vector<int> candidates;
 	int i, j, k;
 	double center[3], tmp[3], dir[3], len;
 	for (i = 0; i < triMesh.eNum; i++) {
@@ -972,18 +972,11 @@ inline void hexGen::GetCellValue() {
 		center[1] = (triMesh.v[triMesh.e[i][0]][1] + triMesh.v[triMesh.e[i][1]][1] + triMesh.v[triMesh.e[i][2]][1]) / 3;
 		center[2] = (triMesh.v[triMesh.e[i][0]][2] + triMesh.v[triMesh.e[i][1]][2] + triMesh.v[triMesh.e[i][2]][2]) / 3;
 
-		const double maxDirection = std::max(std::abs(dir[0]), std::max(std::abs(dir[1]), std::abs(dir[2])));
-		if (!std::isfinite(maxDirection) || maxDirection == 0) continue;
-		const double reach = H_THRES[0] / maxDirection;
-		surfaceIndex.LineCandidates(center, dir, -reach, reach, candidates);
-		for (int candidate : candidates) {
-			j = candidate;
-			if (j <= i) continue;
+		for (j = i + 1; j < triMesh.eNum; j++) {
 			k = Intersect(triMesh.v[triMesh.e[j][0]], triMesh.v[triMesh.e[j][1]], triMesh.v[triMesh.e[j][2]], center, dir, tmp, len);
-			if (k != 1) continue;
-			tmp[0] = std::abs(dir[0]) > std::abs(dir[1]) ? std::abs(dir[0]) : std::abs(dir[1]);
-			tmp[0] = std::abs(dir[2]) > tmp[0] ? std::abs(dir[2]) : tmp[0];
-			len = tmp[0] * std::abs(len);
+			tmp[0] = abs(dir[0]) > abs(dir[1]) ? abs(dir[0]) : abs(dir[1]);
+			tmp[0] = abs(dir[2]) > tmp[0] ? abs(dir[2]) : tmp[0];
+			len = tmp[0] * abs(len);
 			if (k == 1)
 				if (len < H_THRES[0]) {
 					for (k = 0; k < 3; k++) {
@@ -1041,11 +1034,9 @@ inline void hexGen::GetCellValue() {
 	refineTri4.assign(s04.begin(), s04.end());
 	//std::unordered_set<int> s05(refineTri5.begin(), refineTri5.end());
 	//refineTri5.assign(s05.begin(), s05.end());
-	// Level 9 has no refinement criterion; its flags remain false. Visit the
-	// active levels in the same descending ID order without a dense level table.
-	for (int level = std::min(octreeDepth - 1, 8); level >= 0; --level)
-		for (i = levelId[level + 1] - 1; i >= levelId[level]; --i)
-			ComputeCellValue(i, level);
+	// Level 9 has no active criterion in the original source.
+	for (i = levelId[std::min(octreeDepth, 9)] - 1; i > -1; i--)
+		ComputeCellValue(i, getLevel[i]);
 }
 
 inline void hexGen::ComputeCellValue(int octreeId, int level) {
@@ -1059,7 +1050,7 @@ inline void hexGen::ComputeCellValue(int octreeId, int level) {
 					octreeArray[k] = true;
 					if (level == octreeDepth - 2 || !octreeArray[Child(k, level + 1, 0)])
 						for (l = 0; l < 8; l++) {
-							cutArray.push_back(Child(k, level + 1, l));
+							cutArray[leafNum] = Child(k, level + 1, l);
 							leafNum++;
 						}
 				}
@@ -1282,11 +1273,8 @@ inline void hexGen::ComputeCellValue(int octreeId, int level) {
 
 void hexGen::ConstructOctree() {
 	GetCellValue();
-	if (cutArray.empty())
-		throw std::runtime_error("Octree has no leaves; construction requires depth >= 4 and a valid surface");
 	StrongBalancedOctree();
-	std::vector<bool>().swap(octreeArray);
-	std::vector<int>().swap(cutArray1);
+	octreeArray.clear(); cutArray1.clear();
 }
 
 inline void hexGen::OctreeidxToXYZ(int octreeId, int& x, int& y, int& z, int level) {
@@ -1358,67 +1346,118 @@ inline int hexGen::Child(int octreeId, int level, int i) {
 }
 
 inline void hexGen::StrongBalancedOctree() {
-	// Only occupied lattice vertices are stored. Probe the eight surrounding
-	// voxel octants to also find coarse cells whose face/edge contains a fine
-	// corner, including domain boundaries (not just eight matching corners).
-	const std::uint64_t side = static_cast<std::uint64_t>(voxelSize) + 1;
-	struct Corner { int x, y, z, deepest; };
-	while (true) {
-		std::unordered_map<std::uint64_t, size_t> cornerIndex;
-		std::vector<Corner> corners;
-		cornerIndex.reserve(cutArray.size() * 4);
-		std::unordered_set<int> active(cutArray.begin(), cutArray.end());
-		for (int cell : cutArray) {
-			const int level = GetLevel(cell), size = voxelSize >> level;
-			int x, y, z;
-			OctreeidxToXYZ(cell, x, y, z, level);
-			for (int dx = 0; dx < 2; ++dx)
-				for (int dy = 0; dy < 2; ++dy)
-					for (int dz = 0; dz < 2; ++dz) {
-						const int xx = (x + dx) * size, yy = (y + dy) * size, zz = (z + dz) * size;
-						const std::uint64_t key = (static_cast<std::uint64_t>(xx) * side + yy) * side + zz;
-						const auto entry = cornerIndex.emplace(key, corners.size());
-						if (entry.second) corners.push_back({xx, yy, zz, level});
-						else corners[entry.first->second].deepest = std::max(corners[entry.first->second].deepest, level);
-					}
+	int unbalancedNode = 0;
+	int i, j, k, l;
+	int x, y, z;
+	int xx, yy, zz;
+	int level, level1, level2;
+	int leafcellId;
+	int cellSize;
+	int eightCell[8];
+	// Same corner buckets as the legacy dense grid; only occupied entries allocate.
+	std::unordered_map<std::array<int, 3>, std::vector<int>, LatticeHash> preVecEightCell;
+
+	for (i = 0; i < leafNum; i++) {
+		leafcellId = cutArray[i];
+		level = getLevel[leafcellId];
+		cellSize = voxelSize / (1 << level);
+		OctreeidxToXYZ(leafcellId, x, y, z, level);
+
+		for (j = 0; j < 8; j++) {
+			switch (j) {
+			case 0:
+				xx = x * cellSize;
+				yy = y * cellSize;
+				zz = z * cellSize;
+				break;
+			case 1:
+				xx = (x + 1) * cellSize;
+				yy = y * cellSize;
+				zz = z * cellSize;
+				break;
+			case 2:
+				xx = (x + 1) * cellSize;
+				yy = y * cellSize;
+				zz = (z + 1) * cellSize;
+				break;
+			case 3:
+				xx = x * cellSize;
+				yy = y * cellSize;
+				zz = (z + 1) * cellSize;
+				break;
+			case 4:
+				xx = x * cellSize;
+				yy = (y + 1) * cellSize;
+				zz = z * cellSize;
+				break;
+			case 5:
+				xx = (x + 1) * cellSize;
+				yy = (y + 1) * cellSize;
+				zz = z * cellSize;
+				break;
+			case 6:
+				xx = (x + 1) * cellSize;
+				yy = (y + 1) * cellSize;
+				zz = (z + 1) * cellSize;
+				break;
+			case 7:
+				xx = x * cellSize;
+				yy = (y + 1) * cellSize;
+				zz = (z + 1) * cellSize;
+				break;
+			}
+			preVecEightCell[{{xx, yy, zz}}].push_back(leafcellId);
+		}
+	}
+
+	for (i = 0; i < leafNum; i++) {
+		leafcellId = cutArray[i];
+		level = getLevel[leafcellId];
+		OctreeidxToXYZ(leafcellId, x, y, z, level);
+
+		cellSize = voxelSize / (1 << level);
+		xx = x * cellSize;
+		yy = y * cellSize;
+		zz = z * cellSize;
+
+		if (preVecEightCell[{{xx, yy, zz}}].size() == 8) {
+			level1 = 0;
+			for (j = 0; j < 8; j++) {
+				level2 = getLevel[preVecEightCell[{{xx, yy, zz}}][j]];
+				level1 = (level1 < level2 ? level2 : level1);
+			}
+
+			for (j = 0; j < 8; j++) {
+				level2 = getLevel[preVecEightCell[{{xx, yy, zz}}][j]];
+				if (level1 - level2 > 1 && !octreeArray[preVecEightCell[{{xx, yy, zz}}][j]]) {
+					octreeArray[preVecEightCell[{{xx, yy, zz}}][j]] = true;
+					RefineBrothers(preVecEightCell[{{xx, yy, zz}}][j], level2, eightCell);
+					for (k = 0; k < 8; k++)
+						for (l = 0; l < 8; l++) {
+							cutArray.push_back(Child(eightCell[k], getLevel[eightCell[k]], l));
+							leafNum++;
+						}
+					unbalancedNode++;
+				}
+			}
+		}
+	}
+
+	int leafNum1 = 0;
+
+	for (i = 0; i < cutArray.size(); i++)
+		if (!octreeArray[cutArray[i]]) {
+			cutArray1[leafNum1] = cutArray[i];
+			leafNum1++;
 		}
 
-		std::vector<int> refine;
-		std::unordered_set<int> scheduled;
-		for (const Corner& corner : corners)
-			for (int dx = -1; dx <= 0; ++dx)
-				for (int dy = -1; dy <= 0; ++dy)
-					for (int dz = -1; dz <= 0; ++dz) {
-						const int x = corner.x + dx, y = corner.y + dy, z = corner.z + dz;
-						if (x < 0 || y < 0 || z < 0 || x >= voxelSize || y >= voxelSize || z >= voxelSize) continue;
-						for (int level = 0; level < corner.deepest - 1; ++level) {
-							const int shift = octreeDepth - level, res = levelRes[level];
-							const int cell = levelId[level] + ((z >> shift) * res + (y >> shift)) * res + (x >> shift);
-							if (!active.count(cell)) continue;
-							if (!octreeArray[cell]) {
-								int siblings[8], count = 8;
-								if (level == 0) { siblings[0] = cell; count = 1; octreeArray[cell] = true; }
-								else RefineBrothers(cell, level, siblings);
-								for (int i = 0; i < count; ++i)
-									if (active.count(siblings[i]) && scheduled.insert(siblings[i]).second)
-										refine.push_back(siblings[i]);
-							}
-							break;
-						}
-					}
-		std::cout << "Occupied balance vertices: " << corners.size()
-			<< ", leaves to refine: " << refine.size() << std::endl;
-		if (refine.empty()) break;
-		cutArray1.clear();
-		cutArray1.reserve(cutArray.size() + 7 * refine.size());
-		for (int cell : cutArray)
-			if (!scheduled.count(cell)) cutArray1.push_back(cell);
-		for (int cell : refine)
-			for (int child = 0; child < 8; ++child)
-				cutArray1.push_back(Child(cell, GetLevel(cell), child));
-		cutArray.swap(cutArray1);
-	}
-	leafNum = static_cast<int>(cutArray.size());
+	cutArray = cutArray1;
+	leafNum = leafNum1;
+
+	std::cout << "Number of unbalanced nodes: " << unbalancedNode << std::endl;
+
+	if (unbalancedNode > 0)
+		StrongBalancedOctree();
 }
 
 void hexGen::OutputOctree(const char* fileName) {
@@ -1427,7 +1466,7 @@ void hexGen::OutputOctree(const char* fileName) {
 	int cellsize;
 	int x, y, z;
 	int i, j, k;
-	bool overlap;// check if two points overlap with each other
+	std::unordered_map<std::array<int, 3>, int, LatticeHash> vertexIndex;
 	octreeMesh.Initialize(2 * leafNum);
 	octreeENum = 2 * leafNum;
 	octreeMesh.eNum = leafNum;
@@ -1435,7 +1474,7 @@ void hexGen::OutputOctree(const char* fileName) {
 	for (i = 0; i < leafNum; i++)
 	{
 		octreeId = cutArray[i];
-		level = GetLevel(octreeId);
+		level = getLevel[octreeId];
 		cellsize = voxelSize / (1 << level);
 		OctreeidxToXYZ(octreeId, x, y, z, level);
 		// cube shape
@@ -1478,18 +1517,12 @@ void hexGen::OutputOctree(const char* fileName) {
 				octreeMesh.v[octreeMesh.vNum][2] += cellsize;
 				break;
 			}
-			overlap = false;
-			for (k = 0; k < octreeMesh.vNum; k++) {
-				if (dist(octreeMesh.v[octreeMesh.vNum], octreeMesh.v[k]) < DIST_THRES) {// overlap
-					overlap = true;
-					octreeMesh.e[i][j] = k;
-					break;
-				}
-			}
-			if (!overlap) {// create new point
-				octreeMesh.e[i][j] = octreeMesh.vNum;
-				octreeMesh.vNum++;
-			}
+			const double* point = octreeMesh.v[octreeMesh.vNum];
+			const std::array<int, 3> key = {{static_cast<int>(point[0]),
+				static_cast<int>(point[1]), static_cast<int>(point[2])}};
+			const auto entry = vertexIndex.emplace(key, octreeMesh.vNum);
+			octreeMesh.e[i][j] = entry.first->second;
+			if (entry.second) ++octreeMesh.vNum;
 		}
 	}
 	cutArray.clear();
@@ -1557,15 +1590,18 @@ void hexGen::DualFullHexMeshExtraction(const char* fileName) {
 	// empty hex candidates + generate regular hex
 	int countValence, num[8], collectNumLength = 0; double size[8];
 	std::vector<std::vector<int>> collectNum(octreeMesh.vNum, std::vector<int>(9));
+	std::vector<std::vector<std::pair<int, int>>> incidentCells(octreeMesh.vNum);
+	for (j = 0; j < leafNum; ++j)
+		for (k = 0; k < 8; ++k)
+			incidentCells[octreeMesh.e[j][k]].push_back(std::make_pair(j, k));
 	for (i = 0; i < octreeMesh.vNum; i++) {
 		countValence = 0;
-		for (j = 0; j < leafNum; j++)
-			for (k = 0; k < 8; k++)
-				if (octreeMesh.e[j][k] == i) {
-					size[countValence] = std::abs(octreeMesh.v[octreeMesh.e[j][0]][0] - octreeMesh.v[octreeMesh.e[j][6]][0]);
-					num[idTransform[k]] = j;
-					countValence++;
-				}
+		for (const auto& incident : incidentCells[i]) {
+			j = incident.first; k = incident.second;
+			size[countValence] = abs(octreeMesh.v[octreeMesh.e[j][0]][0] - octreeMesh.v[octreeMesh.e[j][6]][0]);
+			num[idTransform[k]] = j;
+			countValence++;
+		}
 		if (countValence == 8 && !(size[0] == size[1] && size[0] == size[2] && size[0] == size[3] && size[0] == size[4] && size[0] == size[5] && size[0] == size[6] && size[0] == size[7])) {
 			collectNum[collectNumLength][8] = i;
 			for (m = 0; m < 8; m++)
@@ -2549,26 +2585,18 @@ void hexGen::ReadDualFullHex(const char* inputFileName) {
 }
 
 void hexGen::RemoveOutsideElement(const char* fileName) {// write from hexMesh to octreeMesh (leafNum)
-	EnsureSurfaceIndex();
-	std::vector<int> candidates;
 	int i, j, k, l, idx[27]; bool pass, inside, overlap; double alpha, ref[19][3], tmp[3], tmp2[3], dir[3];
 
 	leafNum = 0; octreeMesh.vNum = 0; std::vector<double> deletePoint(hexMesh.vNum, MAX_NUM2);
 
 	for (i = 0; i < hexMesh.vNum; i++) {
 		pass = false;
-		int attempts = 0;
 		while (!pass) {
-			if (++attempts > 128)
-				throw std::runtime_error("Could not find an unambiguous inside/outside ray");
 			pass = true;  inside = false;
 			tmp2[0] = (rand() / (RAND_MAX * 1.f) + DIST_THRES) * ((rand() / (RAND_MAX * 1.f) - 0.5 > 0) ? -1 : 1);
 			tmp2[1] = (rand() / (RAND_MAX * 1.f) + DIST_THRES) * ((rand() / (RAND_MAX * 1.f) - 0.5 > 0) ? -1 : 1);
 			tmp2[2] = (rand() / (RAND_MAX * 1.f) + DIST_THRES) * ((rand() / (RAND_MAX * 1.f) - 0.5 > 0) ? -1 : 1);
-			surfaceIndex.LineCandidates(hexMesh.v[i], tmp2,
-				-std::numeric_limits<double>::infinity(), std::numeric_limits<double>::infinity(), candidates);
-			for (int candidate : candidates) {
-				j = candidate;
+			for (j = 0; j < triMesh.eNum; j++) {
 				k = Intersect(triMesh.v[triMesh.e[j][0]], triMesh.v[triMesh.e[j][1]], triMesh.v[triMesh.e[j][2]], hexMesh.v[i], tmp2, tmp, alpha);
 				if (k == 1 && alpha > 0) inside = !inside;
 				else if (k == -1) {
@@ -2576,7 +2604,11 @@ void hexGen::RemoveOutsideElement(const char* fileName) {// write from hexMesh t
 				}
 			}
 		}
-		deletePoint[i] = NearestSurface(hexMesh.v[i], tmp);
+		for (j = 0; j < triMesh.eNum; j++) {
+			alpha = PointToTri(triMesh.v[triMesh.e[j][0]], triMesh.v[triMesh.e[j][1]], triMesh.v[triMesh.e[j][2]], hexMesh.v[i], tmp, deletePoint[i]);
+			if (alpha < deletePoint[i])
+				deletePoint[i] = alpha;
+		}
 		if (!inside) deletePoint[i] = -deletePoint[i];// signed distance, negative for outside points
 	}
 
@@ -2805,15 +2837,8 @@ void hexGen::ReadDualHex(const char* inputFileName) {
 	fclose(dataFile);
 }
 
-ProjectionResult hexGen::ProjectToIsoSurface(const char* fileName, const ProjectionOptions& options) {// modify octreeMesh only
-	ProjectionControl control(options);
-	ProjectionResult result;
-	EnsureSurfaceIndex();
-	ELEM_THRES = std::min(0.01, options.targetScaledJacobian);
-	if (leafNum == 0 || octreeMesh.vNum == 0) {
-		result.status = ProjectionStatus::InvalidGeometry;
-		return result;
-	}
+void hexGen::ProjectToIsoSurface(const char* fileName, int maxIterations) {// modify octreeMesh only
+	int completedIterations = 0;
 	int i, j, k, l, fIdx = 0; bool pair;
 	std::vector<std::vector<int>> face(leafNum * 6, std::vector<int>(5));// 4 points in surface + exist number
 	// initialize face overlap number
@@ -2839,10 +2864,6 @@ ProjectionResult hexGen::ProjectToIsoSurface(const char* fileName, const Project
 			}
 		}
 	face.erase(face.begin() + fIdx, face.end());
-	if (fIdx == 0) {
-		result.status = ProjectionStatus::InvalidGeometry;
-		return result;
-	}
 
 	std::vector<bool> pointOnSurface(octreeMesh.vNum, false);// if a point is on the surface
 	std::vector<int> projNum(octreeMesh.vNum);
@@ -2970,9 +2991,9 @@ ProjectionResult hexGen::ProjectToIsoSurface(const char* fileName, const Project
 				}
 	projNum.clear();
 
-	double target[3], minDist, dis, sJL = 0, tmp[3], tmp2[3], LEARNING_RATE = 5.0e-4f, aveDist = MAX_NUM2, smallDist = 114514, prop,
+	double(*g)[3], target[3], minDist, dis, sJL = 0, tmp[3], tmp2[3], LEARNING_RATE = 5.0e-4f, aveDist = MAX_NUM2, smallDist = 114514, prop,
 		x0, y0, z0, x1, y1, z1, x2, y2, z2, x3, y3, z3, x4, y4, z4, x5, y5, z5, x6, y6, z6, x7, y7, z7;
-	std::vector<std::array<double, 3>> g(2 * sPIdx + bP2.size());// gradient
+	g = new double[2 * sPIdx + bP2.size()][3];// gradient
 	int minIdx[9], maxDistIdx = -114514;
 	bool allPositive = false;
 
@@ -2982,9 +3003,18 @@ ProjectionResult hexGen::ProjectToIsoSurface(const char* fileName, const Project
 	std::vector<int> dragCount(sPIdx, 0);
 
 	for (i = 0; i < sPIdx; i++) {
-		NearestSurface(octreeMesh.v[bP[i]], target, &triNum[i]);
+		minDist = MAX_NUM2;
+		for (j = 0; j < triMesh.eNum; j++) {
+			dis = PointToTri(triMesh.v[triMesh.e[j][0]], triMesh.v[triMesh.e[j][1]], triMesh.v[triMesh.e[j][2]], octreeMesh.v[bP[i]], target, minDist);
+			if (dis < minDist) {
+				minDist = dis;
+				triNum[i] = j;
+			}
+		}
 	}
-	for (int iteration = 1; iteration <= options.maxIterations; ++iteration) {
+	i = 0;
+	while (true) {
+		i++;
 		for (j = 0; j < 2 * sPIdx + bP2.size(); j++) {
 			g[j][0] = 0; g[j][1] = 0; g[j][2] = 0;
 		}
@@ -4187,29 +4217,19 @@ ProjectionResult hexGen::ProjectToIsoSurface(const char* fileName, const Project
 		}
 
 		// update with gradient
-		bool finiteCoordinates = true;
 		for (j = 0; j < 2 * sPIdx; j++) {
 			octreeMesh.v[bP[j]][0] += LEARNING_RATE * g[j][0];
 			octreeMesh.v[bP[j]][1] += LEARNING_RATE * g[j][1];
 			octreeMesh.v[bP[j]][2] += LEARNING_RATE * g[j][2];
-			for (int axis = 0; axis < 3; ++axis)
-				finiteCoordinates = finiteCoordinates && std::isfinite(octreeMesh.v[bP[j]][axis]);
 		}
 		for (j = 2 * sPIdx; j < 2 * sPIdx + bP2.size(); j++) {
 			octreeMesh.v[bP2[j - 2 * sPIdx]][0] += LEARNING_RATE * g[j][0];
 			octreeMesh.v[bP2[j - 2 * sPIdx]][1] += LEARNING_RATE * g[j][1];
 			octreeMesh.v[bP2[j - 2 * sPIdx]][2] += LEARNING_RATE * g[j][2];
-			for (int axis = 0; axis < 3; ++axis)
-				finiteCoordinates = finiteCoordinates && std::isfinite(octreeMesh.v[bP2[j - 2 * sPIdx]][axis]);
-		}
-		if (!finiteCoordinates) {
-			result.status = ProjectionStatus::InvalidGeometry;
-			result.iterations = iteration;
-			break;
 		}
 
-		if (iteration % options.checkEvery == 0 || iteration == options.maxIterations) {
-			for (int smoothing = 0; smoothing < SMOOTH_EPOCH; ++smoothing) {
+		if (i % UPDATE_EVERY == 0) {
+			for (i = 0; i < SMOOTH_EPOCH; i++) {
 				if (ELEM_THRES == 0.01) {
 					for (j = 0; j < sPIdx; j++) {
 						tmp[0] = 0; tmp[1] = 0; tmp[2] = 0;
@@ -4263,7 +4283,15 @@ ProjectionResult hexGen::ProjectToIsoSurface(const char* fileName, const Project
 							tmp[2] = prop * tmp[2] + (1 - prop) * octreeMesh.v[bP[j + sPIdx]][2];
 						}
 
-						minDist = NearestSurface(tmp, target);
+						minDist = MAX_NUM2;
+						for (k = 0; k < triMesh.eNum; k++) {
+							dis = PointToTri(triMesh.v[triMesh.e[k][0]], triMesh.v[triMesh.e[k][1]], triMesh.v[triMesh.e[k][2]],
+								tmp, tmp2, minDist);
+							if (dis < minDist) {
+								minDist = dis;
+								target[0] = tmp2[0]; target[1] = tmp2[1]; target[2] = tmp2[2];
+							}
+						}
 
 						if (bP[j + sPIdx] == maxDistIdx) {
 							if (dragCount[j] % 10 == 2) {
@@ -4300,7 +4328,15 @@ ProjectionResult hexGen::ProjectToIsoSurface(const char* fileName, const Project
 				else {
 					for (j = 0; j < sPIdx; j++)
 						if (bP[j + sPIdx] == maxDistIdx) {
-							minDist = NearestSurface(octreeMesh.v[bP[j + sPIdx]], target);
+							minDist = MAX_NUM2;
+							for (k = 0; k < triMesh.eNum; k++) {
+								dis = PointToTri(triMesh.v[triMesh.e[k][0]], triMesh.v[triMesh.e[k][1]], triMesh.v[triMesh.e[k][2]],
+									octreeMesh.v[bP[j + sPIdx]], tmp2, minDist);
+								if (dis < minDist) {
+									minDist = dis;
+									target[0] = tmp2[0]; target[1] = tmp2[1]; target[2] = tmp2[2];
+								}
+							}
 
 							if (dragCount[j] % 10 == 2) {
 								octreeMesh.v[bP[j + sPIdx]][0] = target[0];
@@ -4311,9 +4347,19 @@ ProjectionResult hexGen::ProjectToIsoSurface(const char* fileName, const Project
 						}
 				}
 			}
+			i = 0;
 			for (j = 0; j < sPIdx; j++) {
-				minDist = NearestSurface(octreeMesh.v[bP[j + sPIdx]], tmp, &triNum[j]);
-				if (smallDist < options.surfaceTolerance) {
+				minDist = MAX_NUM2;
+				for (k = 0; k < triMesh.eNum; k++) {
+					dis = PointToTri(triMesh.v[triMesh.e[k][0]], triMesh.v[triMesh.e[k][1]], triMesh.v[triMesh.e[k][2]],
+						octreeMesh.v[bP[j + sPIdx]], target, minDist);
+					if (dis < minDist) {
+						minDist = dis;
+						triNum[j] = k;
+						tmp[0] = target[0]; tmp[1] = target[1]; tmp[2] = target[2];
+					}
+				}
+				if (smallDist < DIST_THRES2) {
 					octreeMesh.v[bP[j + sPIdx]][0] = tmp[0];
 					octreeMesh.v[bP[j + sPIdx]][1] = tmp[1];
 					octreeMesh.v[bP[j + sPIdx]][2] = tmp[2];
@@ -4330,35 +4376,18 @@ ProjectionResult hexGen::ProjectToIsoSurface(const char* fileName, const Project
 				}
 			}
 			k = 0;
-			double minimumJacobian = std::numeric_limits<double>::infinity();
 			for (j = 0; j < affElemNum; j++) {
 				// calculate bad jacobian number
-				const double jacobian = Sj(octreeMesh.v[octreeMesh.e[j][0]], octreeMesh.v[octreeMesh.e[j][1]],
+				if (Sj(octreeMesh.v[octreeMesh.e[j][0]], octreeMesh.v[octreeMesh.e[j][1]],
 					octreeMesh.v[octreeMesh.e[j][2]], octreeMesh.v[octreeMesh.e[j][3]],
 					octreeMesh.v[octreeMesh.e[j][4]], octreeMesh.v[octreeMesh.e[j][5]],
-					octreeMesh.v[octreeMesh.e[j][6]], octreeMesh.v[octreeMesh.e[j][7]]);
-				if (!std::isfinite(jacobian)) {
-					minimumJacobian = -std::numeric_limits<double>::infinity();
-					break;
-				}
-				minimumJacobian = std::min(minimumJacobian, jacobian);
-				if (jacobian <= ELEM_THRES) k++;
+					octreeMesh.v[octreeMesh.e[j][6]], octreeMesh.v[octreeMesh.e[j][7]]) <= ELEM_THRES) k++;
 			}
-			result.iterations = iteration;
-			result.minScaledJacobian = minimumJacobian;
-			result.maxSurfaceDistance = smallDist;
-			result.status = control.Check(iteration, k, minimumJacobian, smallDist);
-			std::cout << "iteration: " << iteration << " badElem: " << k << " minSJ: " << minimumJacobian
-				<< " aveDist: " << aveDist / sPIdx << " maxDist: " << smallDist << std::endl;
+			std::cout << "badElem: " << k << " aveDist: " << aveDist / sPIdx << " maxDist: " << smallDist << " maxDistIdx: " << maxDistIdx << std::endl;
 			octreeMesh.WriteToVtk(fileName, BOX_LENGTH_RATIO, START_POINT);
-			if (result.status != ProjectionStatus::Running) {
-				if (result.status == ProjectionStatus::Converged)
-					octreeMesh.WriteToVtk("finalMesh.vtk", BOX_LENGTH_RATIO, START_POINT);
-				break;
-			}
-			if (k == 0 && smallDist < options.surfaceTolerance) {
-				if (ELEM_THRES == 0.01) ELEM_THRES = std::min(0.53, options.targetScaledJacobian);
-				else ELEM_THRES = std::min(ELEM_THRES + 0.01, options.targetScaledJacobian);
+			if (k == 0 && smallDist < DIST_THRES2) {
+				if (ELEM_THRES == 0.01) ELEM_THRES = 0.53;
+				else ELEM_THRES += 0.01;
 
 				for (j = 0; j < sPIdx; j++) {
 					tmp[0] = 0; tmp[1] = 0; tmp[2] = 0;
@@ -4410,7 +4439,15 @@ ProjectionResult hexGen::ProjectToIsoSurface(const char* fileName, const Project
 					tmp[1] = prop * tmp[1] + (1 - prop) * octreeMesh.v[bP[j + sPIdx]][1];
 					tmp[2] = prop * tmp[2] + (1 - prop) * octreeMesh.v[bP[j + sPIdx]][2];
 
-					minDist = NearestSurface(tmp, target);
+					minDist = MAX_NUM2;
+					for (k = 0; k < triMesh.eNum; k++) {
+						dis = PointToTri(triMesh.v[triMesh.e[k][0]], triMesh.v[triMesh.e[k][1]], triMesh.v[triMesh.e[k][2]],
+							tmp, tmp2, minDist);
+						if (dis < minDist) {
+							minDist = dis;
+							target[0] = tmp2[0]; target[1] = tmp2[1]; target[2] = tmp2[2];
+						}
+					}
 
 					pair = true;
 					for (k = 0; k < cE[j].size(); k++) {
@@ -4435,12 +4472,16 @@ ProjectionResult hexGen::ProjectToIsoSurface(const char* fileName, const Project
 						octreeMesh.v[bP[j + sPIdx]][2] = target[2];
 					}
 				}
+				octreeMesh.WriteToVtk("finalMesh.vtk", BOX_LENGTH_RATIO, START_POINT);
 				smallDist = 114514;
 			}
 		}
+		// Count actual outer-loop steps without changing the legacy checkpoint counter i.
+		if (maxIterations > 0 && ++completedIterations >= maxIterations) {
+			octreeMesh.WriteToVtk("iterationMesh.vtk", BOX_LENGTH_RATIO, START_POINT);
+			return;
+		}
 	}
-	std::cout << "Projection stopped: " << ProjectionStatusName(result.status) << std::endl;
-	return result;
 }
 
 inline void hexGen::InitiateElementValence() {

@@ -17,32 +17,35 @@ set(SOURCES
     Mesh.cpp
     Mesh.h
     StaticVars.h
-    TriangleBVH.h
-    ProjectionControl.h
 )
 
 add_executable(HexGen ${SOURCES})
 target_compile_features(HexGen PRIVATE cxx_std_11)
+set_target_properties(HexGen PROPERTIES CXX_STANDARD 11 CXX_STANDARD_REQUIRED YES CXX_EXTENSIONS NO)
+
+# NATIVE preserves the original compiler's overload resolution. FLOATING matches
+# a legacy build where unqualified abs(double) selected the floating overload.
+set(HEXGEN_ABS_MODE "NATIVE" CACHE STRING "Legacy abs overload: NATIVE or FLOATING")
+set_property(CACHE HEXGEN_ABS_MODE PROPERTY STRINGS NATIVE FLOATING)
+if (HEXGEN_ABS_MODE STREQUAL "FLOATING")
+    target_compile_definitions(HexGen PRIVATE HEXGEN_FLOATING_ABS)
+elseif (NOT HEXGEN_ABS_MODE STREQUAL "NATIVE")
+    message(FATAL_ERROR "HEXGEN_ABS_MODE must be NATIVE or FLOATING")
+endif()
 
 if (CMAKE_GENERATOR MATCHES "Visual Studio")
     set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT HexGen)
 endif()
 
 include(CTest)
-if (BUILD_TESTING)
-    add_executable(hexgen_regression tests/Regression.cpp Mesh.cpp)
-    target_compile_features(hexgen_regression PRIVATE cxx_std_11)
-    add_test(NAME geometry_queries COMMAND hexgen_regression geometry
-        "${CMAKE_CURRENT_SOURCE_DIR}/../input boundaries/bone_tri.raw"
-        "${CMAKE_CURRENT_SOURCE_DIR}/../input boundaries/sphereInShell_tri.raw")
-    add_test(NAME sparse_balance COMMAND hexgen_regression balance)
-    add_test(NAME projection_stopping COMMAND hexgen_regression projection)
-    add_test(NAME mesh_pipeline COMMAND hexgen_regression pipeline)
-    add_test(NAME mesh_pipeline_bone COMMAND hexgen_regression pipeline
-        "${CMAKE_CURRENT_SOURCE_DIR}/../input boundaries/bone_tri.raw")
-    foreach(test_name geometry_queries sparse_balance projection_stopping mesh_pipeline mesh_pipeline_bone)
-        file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/test-runs/${test_name}")
-        set_tests_properties(${test_name} PROPERTIES TIMEOUT 120
-            WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/test-runs/${test_name}")
-    endforeach()
+if (BUILD_TESTING AND CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    add_test(NAME legacy_equivalence COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../tools/verify_legacy.py"
+        --suite fixtures --iterations 1000 --abs-mode "${HEXGEN_ABS_MODE}"
+        --compiler "${CMAKE_CXX_COMPILER}"
+        --output "${CMAKE_CURRENT_BINARY_DIR}/legacy-equivalence")
+    set_tests_properties(legacy_equivalence PROPERTIES TIMEOUT 240)
+elseif (BUILD_TESTING)
+    message(STATUS "Legacy differential runner requires a Linux GCC/Clang environment")
 endif()
