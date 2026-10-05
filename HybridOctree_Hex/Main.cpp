@@ -3,7 +3,7 @@
 
 using namespace std;
 
-int main()
+int main() try
 {
 	const char* volumeFileName = "model.raw";
 	const char* outputVolumeFileName = "modifiedTri.vtk";
@@ -11,6 +11,8 @@ int main()
 	const char* DualFullHexFileName = "dualFullHex.vtk";
 	const char* DualHexFileName = "dualHex.vtk";
 	const char* ProjHexFileName = "projHex.vtk";
+	ProjectionOptions projectionOptions;
+	bool projectionConverged = true;
 	
 	// 0/1/2/3/4
 	int progress = 0;
@@ -66,14 +68,19 @@ int main()
 	cout << "Time elapsed for extracting interior dual mesh: " << duration << endl;
 	start = clock();
 
-	if (!projHexExist)
-		hexgen.ProjectToIsoSurface(ProjHexFileName);
+	if (!projHexExist) {
+		const auto result = hexgen.ProjectToIsoSurface(ProjHexFileName, projectionOptions);
+		projectionConverged = result.status == ProjectionStatus::Converged;
+	}
 	else
 		hexgen.ReadDualHex(ProjHexFileName);// use the same function as above to store hex info to octreeMesh
 
 	finish = clock();
 	duration = (double)(finish - start) / CLOCKS_PER_SEC;
 	cout << "Time elapsed for projecting to input surface: " << duration << endl;
-	cout << "Mesh generation finished";
-	return 0;
+	cout << (projectionConverged ? "Mesh generation finished" : "Mesh generation stopped before reaching the projection target") << endl;
+	return projectionConverged ? 0 : 2;
+} catch (const std::exception& error) {
+	cerr << "Mesh generation failed: " << error.what() << endl;
+	return 1;
 }

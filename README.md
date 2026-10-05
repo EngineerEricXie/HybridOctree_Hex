@@ -8,6 +8,177 @@ Please also feel free to check out other works on grid-based hexahedral mesh gen
 
 1. https://github.com/CMU-CBML/Element-Saving-Hexahedral-3-Refinement-Templates
 
+## Build
+
+Use an out-of-source build with CMake 3.16 or later and a C++11 compiler:
+
+```sh
+cmake -S HybridOctree_Hex -B build/release -DCMAKE_BUILD_TYPE=Release
+cmake --build build/release --config Release --parallel
+```
+
+Single-configuration generators now default to `Release` when no build type is
+specified. Explicit `Debug` and other configurations are preserved. The checked-in
+generated Makefiles/cache refer to a Windows installation; generate a fresh build
+directory on other machines. `Main.cpp` reads `model.raw` from the working directory.
+
+## Bounded projection, sparse balancing and BVH queries
+
+The three follow-up optimizations are implemented:
+
+- `ProjectToIsoSurface` returns a `ProjectionResult` with a stopping reason,
+  iteration count, minimum scaled Jacobian and maximum surface distance. The
+  quality threshold stops increasing at the requested target. Iteration counting
+  is independent of the smoothing loop and includes the last partial checkpoint.
+  `Main.cpp` returns 0 on success, 2 when projection stops without meeting the
+  target, and 1 on an exception. The current finite checkpoint is written to
+  `projHex.vtk`; `finalMesh.vtk` is refreshed only after convergence.
+- `StrongBalancedOctree` stores occupied integer lattice vertices and performs
+  iterative passes. It finds touching coarse leaves even when a fine corner lies
+  inside a coarse face or edge, including domain boundaries. Siblings are refined
+  together for the extraction templates. The fixed `(1025)^3` vector allocation
+  (about 24.07 GiB of headers per old invocation) and recursion are removed.
+  Leaf lists now contain only active IDs, with no 100-million-entry padding.
+  Levels are computed from ID ranges, eliminating the dense level table and
+  correctly handling the deepest level.
+- A reusable `TriangleBVH` filters thickness segments and inside/outside lines,
+  and performs nearest-surface queries for removal and projection. Existing
+  triangle predicates remain the narrow phase. Candidate IDs are sorted, and
+  nearest-distance ties choose the lowest input triangle ID. The BVH is built
+  lazily and invalidated when the surface is read again.
+
+Projection defaults are in `ProjectionControl.h`; configure `projectionOptions`
+in `Main.cpp` or pass options directly to `ProjectToIsoSurface`:
+
+| Option | Default | Meaning |
+| --- | ---: | --- |
+| `targetScaledJacobian` | 0.53 | Converged mesh must have minimum SJ strictly above this value. |
+| `surfaceTolerance` | 1e-6 | Maximum surface distance must be below this value, in normalized [0, 100] coordinates. |
+| `maxIterations` | 100000 | Hard limit on gradient iterations. |
+| `checkEvery` | 1000 | Quality, distance, smoothing and checkpoint interval; the last iteration is always checked. |
+| `stagnationChecks` | 20 | Stop after this many consecutive checkpoints without significant improvement. |
+| `progressTolerance` | 1e-8 | Absolute improvement threshold for SJ and distance; a reduction in bad-element count also resets stagnation. |
+
+Nonfinite updated coordinates/quality stop with `InvalidGeometry`. A finite
+iteration budget does not guarantee that the optimizer can attain the requested
+quality on every input. Inspect the returned status before using an output as a
+converged result.
+
+### Validation and measurements
+
+```sh
+cmake -S HybridOctree_Hex -B build/release -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+cmake --build build/release --parallel
+ctest --test-dir build/release --output-on-failure
+# Print the brute-force/BVH query timings and triangle-evaluation counts:
+ctest --test-dir build/release -R geometry_queries -V
+```
+
+Five CTest cases pass in Release and with AddressSanitizer/UndefinedBehaviorSanitizer:
+geometry queries, sparse balancing, projection stopping, and full-stage cube/bone
+smoke tests. Geometry checks compare triangle IDs, distances and closest-point
+bytes against the full scan on cube, bone and sphereInShell, plus full-line and
+finite-segment intersection sets. Balance tests verify complete coverage, no
+overlap/duplicate leaves, all 26 kinds of voxel adjacency satisfying 2:1 balance,
+and idempotence on three adaptive partitions at a depth-10 lattice resolution.
+Projection tests cover successful stopping (using deliberately loose fixture
+targets), stagnation, invalid options, nonfinite quality and a limit that is not a
+regular checkpoint. Full-stage tests use depth 4 and two projection iterations;
+they validate finite coordinates and connectivity, not default-target convergence
+of all production models. Leak detection is disabled for the sanitizer run because
+the pre-existing mesh ownership/destructor leaks remain outside this change.
+
+On the same i9-14900KF/GCC 11.4 machine, bone initialization now takes about
+**0.047 s and 151 MiB peak RSS**, versus **0.661 s and 2.04 GiB** for the previous
+byte-level-table version (three-run medians, identical `-O3` flags). The original
+pre-optimization initialization required about 5.46 GiB. A dense refinement bit
+array still occupies about 146 MiB at depth 10, and construction releases it after
+balancing.
+
+For 660 nearest-surface queries per model, the BVH evaluates **31,521 instead of
+7,978,080 triangles on bone**, and **14,132 instead of 4,051,080 on sphereInShell**.
+Measured nearest-query speedups are approximately 50x and 30x respectively;
+small meshes such as the 12-triangle cube may be slower due to traversal overhead.
+These are stage measurements, not whole-application speedup claims.
+
+### Numerical behavior changes
+
+Unqualified `abs(double)` resolved to the integer overload with GCC, truncating
+distances and direction components. Calls now use `std::abs`, retaining fractions;
+this is necessary for valid distance bounds during BVH pruning. Broad-phase
+filtering also avoids retrying rays because of unrelated parallel triangles.
+Ambiguous candidate intersections still retry, up to 128 attempts before an
+explicit error. Together with corrected deepest-level IDs and coarse/fine
+balancing, these fixes mean full meshes need not be byte-identical to the old
+implementation. The BVH differential tests use the corrected floating-point
+predicates on both sides. Curvature preprocessing remains byte-identical.
+
+Remaining performance work includes vertex deduplication, face/element adjacency
+indexes, and hierarchical cell construction. The unused level-9 scan is skipped
+(19,173,961 rather than 153,391,689 cell visits at default depth), but active-level
+cell/triangle scans remain. The gradient optimizer itself was not redesigned.
+
+## Initial preprocessing measurements (2026-10-05)
+
+The following records the first optimization pass, before the changes above.
+Its curvature calculation and traversal order were preserved:
+
+- `ReadRawData` builds a vertex-to-triangle index and checks only incident
+  triangles when accumulating curvature. The previous implementation searched
+  every remaining triangle for each vertex of each triangle. For ordinary meshes
+  with bounded vertex valence, candidate work is approximately linear instead of
+  quadratic; unusually high valence can still cause quadratic work. The index
+  requires O(vertices + triangles) additional temporary storage.
+- The intermediate version stored `getLevel` as `unsigned char` instead of `int`.
+  At the default `VOXEL_SIZE=10`, this removes approximately 3.43 GiB of allocation
+  and zero-initialization on platforms with four-byte integers. Table size and
+  values were preserved, including the original zero-filled deepest level. The
+  current implementation replaces this table with `GetLevel` as described above.
+
+Measured on an Intel Core i9-14900KF under WSL/Linux, GCC 11.4, `-O3 -DNDEBUG`,
+against commit `dfcb3db`. Both versions used the same compiler flags. Values are
+the median of three separate process runs, alternating baseline/candidate order.
+These are **surface reading, normalization, curvature calculation and VTK output**
+times; they exclude octree allocation/construction and subsequent mesh stages.
+
+| Input | Triangles | Before | After | Stage speedup |
+| --- | ---: | ---: | ---: | ---: |
+| sphereInShell | 6,138 | 0.0346 s | 0.00410 s | 8.4x |
+| bone | 12,088 | 0.1268 s | 0.00838 s | 15.1x |
+| bunny | 22,490 | 0.4516 s | 0.01719 s | 26.3x |
+| bumpy_torus | 30,558 | 0.8291 s | 0.02441 s | 34.0x |
+| fertility | 52,456 | 2.4892 s | 0.03762 s | 66.2x |
+
+Including default octree allocation, `InitializeOctree` on bone decreased from
+1.953 s to 0.589 s (3.3x). Peak process RSS decreased from approximately 5.46 GiB
+to 2.04 GiB (63%). These results are environment dependent and are not a claim
+about total mesh-generation speed.
+
+Validation compared VTK bytes and the unrounded binary `double` curvature arrays:
+all five meshes and six synthetic cases matched exactly. Synthetic cases cover
+boundary edges, vertex-only adjacency, nonmanifold edges, duplicate faces,
+repeated vertex IDs, and mixed triangle order. The initialization benchmark also
+checks old table values or current level-range boundaries outside the timed section. A Release build passed;
+the source's missing `<cmath>` dependency was added to make it compile with GCC.
+
+Reproduce the measurements and equivalence checks with Python 3, GCC and GNU time:
+
+```sh
+baseline_dir="$(mktemp -d)"
+git archive dfcb3db HybridOctree_Hex | tar -x -C "$baseline_dir"
+python3 tools/benchmark_curvature.py "$baseline_dir/HybridOctree_Hex" \
+  "input boundaries/sphereInShell_tri.raw" "input boundaries/bone_tri.raw" \
+  "input boundaries/bunny_tri.raw" "input boundaries/bumpy_torus_tri.raw" \
+  "input boundaries/fertility_tri.raw"
+python3 tools/benchmark_curvature.py "$baseline_dir/HybridOctree_Hex" \
+  "input boundaries/bone_tri.raw" --mode initialize
+```
+
+The benchmark uses a temporary driver to access preprocessing directly; it does
+not change the application API. Initialization mode needs enough RAM for the
+baseline's approximately 5.5 GiB allocation. The synthetic cases test equivalence
+with existing behavior, not the geometric validity of degenerate input.
+
 # Citation
 ```angular2html
 @article{tong2024hybridoctree_hex,

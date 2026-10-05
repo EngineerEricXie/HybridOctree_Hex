@@ -7,6 +7,8 @@
 #include "StaticVars.h"
 #include "Mesh.h"
 #include "Initialization.h"
+#include "TriangleBVH.h"
+#include "ProjectionControl.h"
 
 // general functions
 // distance between two vertices
@@ -28,7 +30,7 @@ inline double PointToTri(double a[3], double b[3], double c[3], double p[3], dou
 
 // scaled jacobian
 inline double Sj(double p0[3], double p1[3], double p2[3], double p3[3], double p4[3], double p5[3], double p6[3], double p7[3]);
-inline void iSj(double p0[3], double p1[3], double p2[3], double p3[3], double p4[3], double p5[3], double p6[3], double p7[3], double* minIdx);
+inline void iSj(double p0[3], double p1[3], double p2[3], double p3[3], double p4[3], double p5[3], double p6[3], double p7[3], int* minIdx);
 
 // hexGen
 class hexGen
@@ -65,16 +67,24 @@ public:
 	void ReadDualHex(const char* inputFileName);
 
 	// filt surface faces and project surface faces to isosurface
-	void ProjectToIsoSurface(const char* fileName);
+	ProjectionResult ProjectToIsoSurface(const char* fileName,
+		const ProjectionOptions& options = ProjectionOptions());
 
 private:
 	int voxelSize, octreeDepth, leafNum = 0;
 	double BOX_LENGTH, START_POINT[3], BOX_LENGTH_RATIO;// box length and start point determined by triangular mesh
 
 	std::vector<bool> octreeArray;// restore if the octree needs to refine
-	std::vector<int> getLevel, cutArray, cutArray1;// restore the leaf octree cell index
+	std::vector<int> cutArray, cutArray1;// restore the leaf octree cell index
 
 	Mesh triMesh;// triangular structure information
+	TriangleBVH surfaceIndex;
+	void EnsureSurfaceIndex();
+	double NearestSurface(double point[3], double closest[3], int* triangle = nullptr);
+	inline int GetLevel(int octreeId) const {
+		return static_cast<int>(std::upper_bound(levelId, levelId + octreeDepth + 2,
+			octreeId) - levelId) - 1;
+	}
 	// different levels triangle number
 	std::vector<int> refineTri0, refineTri1, refineTri2, refineTri3, refineTri4, refineTri5;
 	std::vector<int> refineTriPt0, refineTriPt1, refineTriPt2, refineTriPt3, refineTriPt4, refineTriPt5;
